@@ -1,0 +1,15 @@
+# sentiment_analyzer/requirements.txt
+# Dependencies for the Google Cloud Function (Python 3.9+)
+
+# Google Cloud Pub/Sub client library
+google-cloud-pubsub>=2.15.0
+
+# Google Cloud Logging client library
+google-cloud-logging>=3.4.0
+
+# NLTK for VADER sentiment analysis
+nltk>=3.8.1
+
+# Optional – uncomment if switching to HuggingFace Transformers
+# transformers>=4.30.0
+# torch>=2.0.0

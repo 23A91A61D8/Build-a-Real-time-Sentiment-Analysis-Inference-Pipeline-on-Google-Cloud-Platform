@@ -1,0 +1,5 @@
+# publisher_requirements.txt
+# Dependencies for publisher.py
+
+# Google Cloud Pub/Sub client library
+google-cloud-pubsub>=2.15.0
