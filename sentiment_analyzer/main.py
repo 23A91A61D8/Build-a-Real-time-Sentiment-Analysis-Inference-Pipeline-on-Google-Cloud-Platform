@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Global model initialisation (warm-start optimisation)
-# Loaded once per Cloud Function instance to avoid repeated cold-start costs.
 # ---------------------------------------------------------------------------
 try:
     nltk.data.find("sentiment/vader_lexicon.zip")
@@ -35,10 +34,6 @@ _analyzer = SentimentIntensityAnalyzer()
 logger.info("VADER SentimentIntensityAnalyzer initialised successfully.")
 
 
-# ---------------------------------------------------------------------------
-# Core sentiment analysis function
-# ---------------------------------------------------------------------------
-
 def analyze_sentiment(text: str) -> dict:
     """Perform sentiment analysis on the given text using NLTK VADER.
 
@@ -47,12 +42,12 @@ def analyze_sentiment(text: str) -> dict:
 
     Returns:
         dict: A dictionary containing:
-            - ``text``            : original input text
-            - ``sentiment_label`` : 'POSITIVE', 'NEGATIVE', or 'NEUTRAL'
-            - ``sentiment_score`` : compound score in the range [-1.0, 1.0]
+            - text            : original input text
+            - sentiment_label : 'POSITIVE', 'NEGATIVE', or 'NEUTRAL'
+            - sentiment_score : compound score in the range [-1.0, 1.0]
 
     Raises:
-        ValueError: If *text* is not a non-empty string.
+        ValueError: If text is not a non-empty string.
     """
     if not text or not isinstance(text, str) or not text.strip():
         raise ValueError("Input text must be a non-empty string.")
@@ -74,55 +69,58 @@ def analyze_sentiment(text: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Cloud Function entry point
-# ---------------------------------------------------------------------------
-
-def process_pubsub_message(event: dict, context) -> None:
+def process_pubsub_message(event, context=None):
     """Cloud Function entry point triggered by a Pub/Sub message.
 
-    The message payload must be a Base64-encoded JSON object with at least
-    a ``"text"`` field, e.g.::
-
-        {"id": "1", "text": "This product is amazing!"}
-
-    Sentiment analysis results and errors are written to Cloud Logging.
+    Supports both:
+    - GCP Cloud Function trigger (event dict with 'data' key)
+    - Local testing via functions-framework HTTP requests
 
     Args:
-        event   (dict): The Pub/Sub event payload delivered by GCP.
-        context      : Metadata for the event (event_id, timestamp, etc.).
+        event   : The Pub/Sub event payload or Flask request object.
+        context : Metadata for the event (event_id, timestamp, etc.).
     """
-    # ------------------------------------------------------------------
-    # 1. Validate that the event contains a 'data' field
-    # ------------------------------------------------------------------
-    if "data" not in event:
+    # Handle functions-framework HTTP request format (local testing)
+    try:
+        if hasattr(event, 'get_json'):
+            request_json = event.get_json(silent=True) or {}
+            if 'data' in request_json:
+                event = request_json
+            elif 'message' in request_json:
+                msg = request_json['message']
+                event = {'data': msg.get('data', '')}
+            else:
+                event = request_json
+    except Exception:
+        pass
+
+    # Validate that the event contains a 'data' field
+    if not isinstance(event, dict) or 'data' not in event:
         logger.error(
-            "No 'data' field found in Pub/Sub message. "
-            "Event ID: %s",
+            "No 'data' field found in Pub/Sub message. Event ID: %s",
             getattr(context, "event_id", "unknown"),
         )
-        return
+        return "No data field found", 400
 
-    text_to_analyze = None  # kept in scope so the except block can log it
+    text_to_analyze = None
 
     try:
-        # ----------------------------------------------------------------
-        # 2. Decode Base64-encoded message payload
-        # ----------------------------------------------------------------
-        message_data = base64.b64decode(event["data"]).decode("utf-8")
+        # Decode Base64-encoded message payload
+        raw_data = event["data"]
+        if isinstance(raw_data, bytes):
+            message_data = base64.b64decode(raw_data).decode("utf-8")
+        else:
+            message_data = base64.b64decode(raw_data.encode("utf-8")).decode("utf-8")
+
         logger.info(
             "Received Pub/Sub message. Event ID: %s",
             getattr(context, "event_id", "unknown"),
         )
 
-        # ----------------------------------------------------------------
-        # 3. Parse JSON payload
-        # ----------------------------------------------------------------
+        # Parse JSON payload
         message_json = json.loads(message_data)
 
-        # ----------------------------------------------------------------
-        # 4. Extract the 'text' field
-        # ----------------------------------------------------------------
+        # Extract the 'text' field
         text_to_analyze = message_json.get("text")
         message_id = message_json.get("id", "unknown")
 
@@ -133,41 +131,39 @@ def process_pubsub_message(event: dict, context) -> None:
                 message_id,
                 getattr(context, "event_id", "unknown"),
             )
-            return
+            return "Missing text field", 200
 
-        # ----------------------------------------------------------------
-        # 5. Run sentiment analysis
-        # ----------------------------------------------------------------
+        # Run sentiment analysis
         sentiment_result = analyze_sentiment(text_to_analyze)
 
-        # ----------------------------------------------------------------
-        # 6. Log the result to Cloud Logging (INFO level)
-        # ----------------------------------------------------------------
+        # Log the result to Cloud Logging
         logger.info(
             "Sentiment analysis result: %s",
             json.dumps(sentiment_result),
         )
 
+        return json.dumps(sentiment_result), 200
+
     except json.JSONDecodeError as exc:
         logger.error(
-            "Invalid JSON in Pub/Sub message payload. "
-            "Error: %s | Raw data: %s",
+            "Invalid JSON in Pub/Sub message payload. Error: %s | Raw data: %s",
             exc,
             event.get("data"),
         )
+        return "Invalid JSON", 400
 
     except ValueError as exc:
         logger.error(
-            "Sentiment analysis failed due to invalid input. "
-            "Error: %s | Text: %s",
+            "Sentiment analysis failed due to invalid input. Error: %s | Text: %s",
             exc,
             text_to_analyze,
         )
+        return "Invalid input", 400
 
     except Exception as exc:  # pylint: disable=broad-except
         logger.error(
-            "An unexpected error occurred during message processing. "
-            "Error: %s | Event ID: %s",
+            "An unexpected error occurred. Error: %s | Event ID: %s",
             exc,
             getattr(context, "event_id", "unknown"),
         )
+        return "Unexpected error", 500
